@@ -6656,7 +6656,6 @@ struct siread {
 	uint64_t vlsn;
 	struct svmerge merge;
 	int cache_only;
-	int oldest_only;
 	int read_disk;
 	int read_cache;
 	struct sv *upsert_v;
@@ -8371,7 +8370,6 @@ si_readopen(struct siread *q, struct vinyl_index *index, struct sicache *c,
 	q->upsert_v = NULL;
 	q->upsert_eq = 0;
 	q->cache_only = 0;
-	q->oldest_only = 0;
 	q->read_disk = 0;
 	q->read_cache = 0;
 	q->result = NULL;
@@ -8542,18 +8540,12 @@ si_get(struct siread *q)
 	rc = sv_mergeprepare(m, 1);
 	assert(rc == 0);
 	struct sicachebranch *b;
-	if (q->oldest_only) {
-		b = si_cacheseek(q->cache, &node->self);
-		assert(b != NULL);
+	b = q->cache->branch;
+	while (b && b->branch) {
 		rc = si_getbranch(q, node, b);
-	} else {
-		b = q->cache->branch;
-		while (b && b->branch) {
-			rc = si_getbranch(q, node, b);
-			if (rc != 0)
-				break;
-			b = b->next;
-		}
+		if (rc != 0)
+			break;
+		b = b->next;
 	}
 
 	vy_index_lock(q->index);
@@ -8667,18 +8659,12 @@ next_node:
 		return -1;
 	}
 
-	if (q->oldest_only) {
-		rc = si_rangebranch(q, node, &node->self, m);
+	struct vy_run *b = node->branch;
+	while (b) {
+		rc = si_rangebranch(q, node, b, m);
 		if (unlikely(rc == -1 || rc == 2))
 			return rc;
-	} else {
-		struct vy_run *b = node->branch;
-		while (b) {
-			rc = si_rangebranch(q, node, b, m);
-			if (unlikely(rc == -1 || rc == 2))
-				return rc;
-			b = b->next;
-		}
+		b = b->next;
 	}
 
 	/* merge and filter data stream */
