@@ -562,7 +562,7 @@ c3("t:get{1}")
 -- cleanup
 --
 c1("t:delete{1}")
--- 
+--
 --
 -- statement order is irrelevant, rollback order is important
 c1:begin()
@@ -953,7 +953,7 @@ c3("t:replace{1, 10}")
 --
 c2:commit() -- rollback
 c3:commit() -- rollback
-c3:commit() -- rollback
+c3:commit() -- commit
 --
 -- cleanup
 --
@@ -1373,9 +1373,84 @@ c3("t:get{1}") -- {1, 8}
 -- cleanup
 --
 c1("t:delete{1}")
+-- --------------------------------------------------------------------------
+-- two conflicting inserts
+-- --------------------------------------------------------------------------
+c1:begin()
+c2:begin()
+--
+c1("t:insert{1, 10}")
+--
+c2("t:insert{1, 15}")
+--
+c1:commit() -- success
+c2:commit() -- rollback
+--
+c3("t:get{1}") -- {1, 10}
+--
+--
+-- cleanup
+--
+c1("t:delete{1}")
+--
+c1:begin()
+c2:begin()
+--
+c1("t:insert{1, 10}")
+--
+c2("t:insert{1, 15}")
+--
+c2:commit() -- rollback
+c1:commit() -- success
+--
+c3("t:get{1}") -- {1, 10}
+--
+--
+-- cleanup
+--
+c1("t:delete{1}")
+--
+-- --------------------------------------------------------------------------
+-- Transaction spuriously abort based on CSN clock
+-- --------------------------------------------------------------------------
+t:insert{1, 10}
+t:insert{2, 20}
+
+c7:begin()
+c7("t:insert{8, 800}")
+
+c3:begin()
+c3("t:get{1}")
+c3:commit()
+
+c1:begin()
+c2:begin()
+--
+c1("t:replace{4, 40}")
+--
+c2("t:get{1}")
+--
+c3:begin()
+c3("t:insert{3, 30}")
+c3:commit()
+--
+c2("t:replace{5, 50}")
+c1("t:get{1}")
+
+c1:commit()
+c2:commit()
+c7:rollback()
+--
+-- cleanup
+--
+t:delete{1}
+t:delete{2}
+t:delete{3}
+t:delete{4}
+t:delete{5}
 --
 -- *************************************************************************
--- 1.7 cleanup marker: end of tests cleanup cleanup
+-- 1.7 cleanup marker: end of tests cleanup
 -- *************************************************************************
 --
 box.space.test:drop()
@@ -1386,3 +1461,4 @@ c4 = nil
 c5 = nil
 c6 = nil
 c7 = nil
+box.schema.user.revoke('guest', 'read,write,execute', 'universe')

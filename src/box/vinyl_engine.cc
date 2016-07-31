@@ -215,18 +215,6 @@ VinylEngine::keydefCheck(struct space *space, struct key_def *key_def)
 		          key_def->name,
 		          space_name(space));
 	}
-	if (! key_def->opts.is_unique) {
-		tnt_raise(ClientError, ER_MODIFY_INDEX,
-			  key_def->name,
-			  space_name(space),
-			  "Vinyl index must be unique");
-	}
-	if (key_def->iid != 0) {
-		tnt_raise(ClientError, ER_MODIFY_INDEX,
-			  key_def->name,
-			  space_name(space),
-			  "Vinyl secondary indexes are not supported");
-	}
 }
 
 void
@@ -245,8 +233,7 @@ VinylEngine::prepare(struct txn *txn)
 
 	int rc = vinyl_prepare(env, tx);
 	switch (rc) {
-	case 1: /* rollback */
-	case 2: /* lock */
+	case 1: /* rollback, will be done by all-engines transaction manager */
 		tnt_raise(ClientError, ER_TRANSACTION_CONFLICT);
 		break;
 	case -1:

@@ -48,6 +48,53 @@
 #include "txn.h"
 #include "vinyl.h"
 
+/**
+ * Allocate a new key_def with a set union of key parts from
+ * first and second key defs. Parts of the new key_def consist
+ * of first key_def's parts and those parts of the second key_def
+ * that were not among the first parts.
+ *
+ * @throws OutOfMemory
+ */
+static struct key_def *
+merge_key_defs(struct key_def *first, struct key_def *second)
+{
+	int new_part_count = first->part_count + second->part_count;
+	struct key_part *sec_parts = second->parts;
+	/*
+	 * Find and remove part duplicates, i.e. parts counted
+	 * twice since they are present in both key defs.
+	 */
+	for (struct key_part *iter = sec_parts,
+	     *end = sec_parts + second->part_count; iter != end; ++iter)
+		if (key_def_contains_fieldno(first, iter->fieldno)) {
+			--new_part_count;
+		}
+
+	struct key_def *new_def;
+	new_def =  key_def_new(first->space_id, first->iid, first->name,
+			      first->type, &first->opts, new_part_count);
+
+	/* Write position in the new key def. */
+	uint32_t pos = 0;
+	/* Append first key def's parts to the new key_def. */
+	for (struct key_part *iter = first->parts,
+	     *end = first->parts + first->part_count; iter != end; ++iter) {
+
+		key_def_set_part(new_def, pos++, iter->fieldno, iter->type);
+	}
+	/* Set-append second key def's part to the new key def. */
+	for (struct key_part *iter = sec_parts,
+	     *end = sec_parts + second->part_count; iter != end; ++iter) {
+
+		if (key_def_contains_fieldno(first, iter->fieldno)) {
+			continue;
+		}
+		key_def_set_part(new_def, pos++, iter->fieldno, iter->type);
+	}
+	return new_def;
+}
+
 VinylIndex::VinylIndex(struct key_def *key_def_arg)
 	: Index(key_def_arg)
 {
@@ -56,17 +103,39 @@ VinylIndex::VinylIndex(struct key_def *key_def_arg)
 		(VinylEngine *)space->handler->engine;
 	env = engine->env;
 	int rc;
-	/* create database */
-	db = vinyl_index_new(env, key_def, space->format);
+	struct key_def *vinyl_key_def = key_def;
+	auto guard = make_scoped_guard([&]{
+		if (vinyl_key_def != key_def) {
+			key_def_delete(vinyl_key_def);
+		}
+        });
+	/*
+	 * If the index is not unique, add primary key
+	 * to the end of parts.
+	 */
+	if (!key_def->opts.is_unique) {
+		Index *primary = index_find(space, 0);
+		/* Allocates a new (temporary) key_def */
+		vinyl_key_def = merge_key_defs(key_def, primary->key_def);
+	}
+	char name[128];
+	snprintf(name, sizeof(name), "%d:%d", key_def->space_id, key_def->iid);
+	db = vinyl_index_by_name(env, name);
+	if (db != NULL) {
+		if (key_def_cmp(vinyl_key_def, vy_index_key_def(db)))
+			diag_raise();
+		db = NULL;
+		goto index_exists;
+	}
+	/* Create database. */
+	db = vinyl_index_new(env, vinyl_key_def, space->format);
 	if (db == NULL)
 		diag_raise();
-	/* start two-phase recovery for a space:
-	 * a. created after snapshot recovery
-	 * b. created during log recovery
-	*/
+	/* Start two-phase recovery if the index exists. */
 	rc = vinyl_index_open(db);
 	if (rc == -1)
 		diag_raise();
+index_exists:
 	format = space->format;
 	tuple_format_ref(format, 1);
 }
@@ -155,10 +224,9 @@ struct vinyl_iterator {
 	/* key and part_count used only for EQ */
 	const char *key;
 	int part_count;
-	struct space *space;
+	const VinylIndex *index;
 	struct key_def *key_def;
 	struct vinyl_env *env;
-	struct vinyl_index *db;
 	struct vinyl_cursor *cursor;
 };
 
@@ -234,7 +302,7 @@ vinyl_iterator_exact(struct iterator *ptr)
 {
 	struct vinyl_iterator *it = (struct vinyl_iterator *) ptr;
 	ptr->next = vinyl_iterator_last;
-	VinylIndex *index = (VinylIndex *)index_find(it->space, 0);
+	const VinylIndex *index = it->index;
 	return index->findByKey(it->key, it->part_count);
 }
 
@@ -260,10 +328,9 @@ VinylIndex::initIterator(struct iterator *ptr,
 	assert(part_count == 0 || key != NULL);
 	struct vinyl_iterator *it = (struct vinyl_iterator *) ptr;
 	assert(it->cursor == NULL);
-	it->space = space_cache_find(key_def->space_id);
-	it->key_def = key_def;
+	it->index = this;
+	it->key_def = vy_index_key_def(db);
 	it->env = env;
-	it->db  = db; /* refcounted by vinyl_cursor_new() */
 	it->key = key;
 	it->part_count = part_count;
 
@@ -288,7 +355,8 @@ VinylIndex::initIterator(struct iterator *ptr,
 		break;
 	case ITER_EQ:
 		/* point-lookup iterator (optimization) */
-		if (part_count == key_def->part_count) {
+		if ((key_def->opts.is_unique) &&
+		    (part_count == key_def->part_count)) {
 			ptr->next = vinyl_iterator_exact;
 			return;
 		}
@@ -297,7 +365,8 @@ VinylIndex::initIterator(struct iterator *ptr,
 		break;
 	case ITER_REQ:
 		/* point-lookup iterator (optimization) */
-		if (part_count == key_def->part_count) {
+		if ((key_def->opts.is_unique) &&
+		    (part_count == key_def->part_count)) {
 			ptr->next = vinyl_iterator_exact;
 			return;
 		}
